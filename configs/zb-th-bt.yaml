@@ -1,0 +1,273 @@
+esphome:
+  name: blezigbeethread-bridge
+  friendly_name: BLE+Zigbee+Thread Bridge
+  on_boot:
+    priority: 600
+    then:
+      - switch.turn_on: zRST_gpio
+      - delay: 15ms
+      - switch.turn_off: zRST_gpio
+
+esp32:
+  board: esp32dev
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+api:
+  encryption:
+    key: YOUR_API_KEY
+  reboot_timeout: 10min
+
+logger:
+  level: INFO
+
+ota:
+  - platform: esphome
+    password: YOUR_PASSWORD
+
+external_components:
+  - source: github://tube0013/esphome-stream-server-v2
+
+ethernet:
+  type: LAN8720
+  mdc_pin: GPIO23
+  mdio_pin: GPIO18
+  clk:
+    pin: GPIO0
+    mode: CLK_EXT_IN
+  phy_addr: 1
+  power_pin: GPIO16
+
+  manual_ip:
+    static_ip: x.x.x.x
+    gateway: x.x.x.x
+    subnet: x.x.x.x
+    dns1: x.x.x.x
+
+#GPIO info from SMLIGHT.
+#rx_buffer_size seems necessary for thread, zigbee unclear.
+uart:
+  - id: uart_bus_efr32mg24
+    rx_pin: GPIO5
+    tx_pin: GPIO17
+    baud_rate: 460800
+    rx_buffer_size: 2048
+  - id: uart_bus_cc2674p10
+    rx_pin: GPIO39
+    tx_pin: GPIO15
+    baud_rate: 115200
+    rx_buffer_size: 2048
+
+stream_server:
+  - id: stream_server_efr32mg24
+    uart_id: uart_bus_efr32mg24
+    port: 6638
+  - id: stream_server_cc2674p10
+    uart_id: uart_bus_cc2674p10
+    port: 7638
+
+esp32_ble_tracker:
+  scan_parameters:
+    active: true
+
+bluetooth_proxy:
+  active: true
+
+text_sensor:
+  - platform: template
+    name: "SLZB-MR3 Uptime"
+    lambda: |-
+      uint32_t dur = id(uptime_s).state;
+      int dys = 0;
+      int hrs = 0;
+      int mnts = 0;
+      if (dur > 86399) {
+        dys = trunc(dur / 86400);
+        dur = dur - (dys * 86400);
+      }
+      if (dur > 3599) {
+        hrs = trunc(dur / 3600);
+        dur = dur - (hrs * 3600);
+      }
+      if (dur > 59) {
+        mnts = trunc(dur / 60);
+        dur = dur - (mnts * 60);
+      }
+      char buffer[17];
+      sprintf(buffer, "%ud %02uh %02um %02us", dys, hrs, mnts, dur);
+      return {buffer};
+    icon: mdi:clock-start
+    update_interval: 60s
+
+sensor:
+  - platform: uptime
+    id: uptime_s
+    update_interval: 60s
+
+binary_sensor:
+  - platform: gpio
+    name: "Physical Button Status"
+    icon: mdi:toggle-switch
+    id: gpio35btn1
+    pin:
+      number: GPIO35
+      mode:
+        input: true
+      inverted: yes
+    on_press:
+      then:
+        - switch.toggle: modeSwitchTemplate
+  - platform: stream_server
+    stream_server: stream_server_efr32mg24
+    name: "SLZB-MR3 EFR32MG24 Serial Connected"
+  - platform: stream_server
+    stream_server: stream_server_cc2674p10
+    name: "SLZB-MR3 CC2674P10 Serial Connected"
+
+switch:
+  - platform: restart
+    id: core_restart
+    name: "Core Restart"
+  - platform: template
+    name: "Zigbee Restart"
+    icon: mdi:toggle-switch
+    id: zRST
+    turn_on_action:
+      - switch.turn_on: zRST_gpio
+      - delay: 15ms
+      - switch.turn_off: zRST_gpio
+  - platform: template
+    name: "Full (Core+Zigbee) Restart"
+    icon: mdi:toggle-switch
+    id: fullRST
+    turn_on_action:
+      - switch.turn_on: zRST_gpio
+      - delay: 15ms
+      - switch.turn_off: zRST_gpio
+      - delay: 15ms
+      - switch.turn_on: core_restart
+  - platform: template
+    name: "Zigbee Flash Mode"
+    icon: mdi:cellphone-arrow-down
+    turn_on_action:
+      - script.execute: fw_update_mode
+    turn_off_action:
+      - switch.toggle: zRST
+  - platform: template
+    name: "Device Mode Switch (LAN|OFF / USB|ON)"
+    id: modeSwitchTemplate
+    turn_on_action:
+      - switch.turn_on: gpio12LED1
+      - switch.turn_on: gpio4Select
+      - switch.template.publish:
+          id: modeSwitchTemplate
+          state: ON
+    turn_off_action:
+      - switch.turn_off: gpio12LED1
+      - switch.turn_off: gpio4Select
+      - switch.template.publish:
+          id: modeSwitchTemplate
+          state: OFF
+  - platform: gpio
+    pin: GPIO4
+    id: gpio4Select
+    restore_mode: ALWAYS_OFF
+    internal: true
+  - platform: gpio
+    pin: GPIO32
+    id: zBSL
+    inverted: yes
+    restore_mode: ALWAYS_OFF
+    internal: true
+  - platform: gpio
+    pin: GPIO33
+    id: zRST_gpio
+    inverted: yes
+    restore_mode: ALWAYS_OFF  
+    internal: true
+  - platform: gpio
+    name: "LED - Device Mode (blue)"
+    restore_mode: ALWAYS_OFF
+    icon: mdi:toggle-switch
+    id: gpio12LED1
+    pin: GPIO12
+  - platform: gpio
+    name: "LED - Power (yellow)"
+    restore_mode: ALWAYS_ON
+    icon: mdi:toggle-switch
+    id: gpio14LED2
+    pin: GPIO14
+
+#Increased delay to 10s, seems to be more reliable for EFRMG24. Not working with CC2674P10 yet.
+script:
+  - id: fw_update_mode
+    then:
+      - switch.turn_on: zBSL
+      - delay: 1s
+      - switch.turn_on: zRST_gpio
+      - delay: 1s
+      - switch.turn_off: zRST_gpio
+      - logger.log: 
+          format: "Wait 10 seconds for Zigbee chip to be ready..."
+          level: INFO
+      - delay: 10s
+      - switch.turn_off: zBSL
+      - logger.log: 
+          format: "Update Zigbee firmware now!"
+          level: INFO
+
+#Add baud rate selection based on ESPHome reference code. Needed for firmware updates.
+select:
+  - id: change_efr32mg24_baud_rate
+    name: EFR32MG24 Baud rate
+    platform: template
+    options:
+      - "115200"
+      - "230400"
+      - "460800"
+      - "921600"
+    initial_option: "460800"
+    optimistic: true
+    restore_value: false
+    internal: false
+    entity_category: config
+    icon: mdi:swap-horizontal
+    set_action:
+      - lambda: |-
+          id(uart_bus_efr32mg24).flush();
+          uint32_t new_baud_rate = stoi(x);
+          ESP_LOGD("change_baud_rate", "Changing baud rate from %i to %i",id(uart_bus_efr32mg24).get_baud_rate(), new_baud_rate);
+          if (id(uart_bus_efr32mg24).get_baud_rate() != new_baud_rate) {
+            id(uart_bus_efr32mg24).set_baud_rate(new_baud_rate);
+            id(uart_bus_efr32mg24).load_settings();
+          }
+  - id: change_cc2674p10_baud_rate
+    name: CC2674P10 Baud rate
+    platform: template
+    options:
+      - "115200"
+      - "230400"
+      - "460800"
+      - "500000"
+    initial_option: "115200"
+    optimistic: true
+    restore_value: false
+    internal: false
+    entity_category: config
+    icon: mdi:swap-horizontal
+    set_action:
+      - lambda: |-
+          id(uart_bus_cc2674p10).flush();
+          uint32_t new_baud_rate = stoi(x);
+          ESP_LOGD("change_baud_rate", "Changing baud rate from %i to %i",id(uart_bus_cc2674p10).get_baud_rate(), new_baud_rate);
+          if (id(uart_bus_cc2674p10).get_baud_rate() != new_baud_rate) {
+            id(uart_bus_cc2674p10).set_baud_rate(new_baud_rate);
+            id(uart_bus_cc2674p10).load_settings();
+          }
+
+time:
+  - platform: homeassistant
+    timezone: YOUR_TZ
+    id: time_ha
+    
